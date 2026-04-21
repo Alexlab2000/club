@@ -2,7 +2,7 @@
 
 export const dynamic = "force-dynamic";
 
-import { useEffect, useRef, useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
@@ -16,12 +16,11 @@ type Stage = "loading" | "quiz" | "register" | "verify";
 
 export default function RegisterPage() {
   const [stage, setStage] = useState<Stage>("loading");
-  const [questions, setQuestions] = useState<Question[]>([]);
-  const [currentStep, setCurrentStep] = useState(0);
+  const [question, setQuestion] = useState<Question | null>(null);
   const [answer, setAnswer] = useState("");
   const [error, setError] = useState("");
   const [blocked, setBlocked] = useState(false);
-  const [remainingAttempts, setRemainingAttempts] = useState(5);
+  const [remainingAttempts, setRemainingAttempts] = useState(3);
   const [shaking, setShaking] = useState(false);
   const [checking, setChecking] = useState(false);
 
@@ -34,35 +33,41 @@ export default function RegisterPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
 
+  const sessionKey = useRef(
+    typeof crypto !== "undefined"
+      ? crypto.randomUUID()
+      : Math.random().toString(36)
+  );
+
   useEffect(() => {
-    async function loadQuestions() {
+    async function loadQuestion() {
       const supabase = createClient();
       const { data, error } = await supabase
         .from("registration_questions")
-        .select("id, question_text, order_priority")
-        .order("order_priority", { ascending: true });
+        .select("id, question_text, order_priority");
 
-      if (error || !data || data.length < 5) {
-        setError("Не удалось загрузить 5 вопросов для регистрации. Проверь базу данных.");
+      if (error || !data || data.length === 0) {
+        setError("Не удалось загрузить вопросы. Попробуй позже.");
         return;
       }
 
-      setQuestions(shuffleQuestions(data.slice(0, 5)));
+      const randomIndex = Math.floor(Math.random() * data.length);
+      setQuestion(data[randomIndex]);
       setStage("quiz");
     }
 
-    loadQuestions();
+    loadQuestion();
   }, []);
 
   useEffect(() => {
     if (stage === "quiz" && inputRef.current) {
       inputRef.current.focus();
     }
-  }, [stage, currentStep]);
+  }, [stage]);
 
   async function handleCheckAnswer(e: React.FormEvent) {
     e.preventDefault();
-    if (!answer.trim() || checking || blocked) return;
+    if (!answer.trim() || checking || blocked || !question) return;
 
     setChecking(true);
     setError("");
@@ -72,8 +77,9 @@ export default function RegisterPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          questionId: questions[currentStep].id,
+          questionId: question.id,
           userAnswer: answer.trim(),
+          sessionKey: sessionKey.current,
         }),
       });
 
@@ -81,8 +87,7 @@ export default function RegisterPage() {
 
       if (res.status === 429 || data.blocked) {
         setBlocked(true);
-        setRemainingAttempts(0);
-        setError("Лимит попыток на этот вопрос исчерпан на сегодня. Попробуй завтра.");
+        setError("Слишком много неверных попыток. Попробуй позже.");
         setChecking(false);
         return;
       }
@@ -90,24 +95,15 @@ export default function RegisterPage() {
       if (data.correct) {
         setAnswer("");
         setError("");
-        setBlocked(false);
-        setRemainingAttempts(5);
-
-        if (currentStep + 1 >= questions.length) {
-          setStage("register");
-        } else {
-          setCurrentStep((step) => step + 1);
-        }
+        setRemainingAttempts(3);
+        setStage("register");
       } else {
         setRemainingAttempts(data.remainingAttempts ?? 0);
-
         if (data.remainingAttempts === 0) {
           setBlocked(true);
-          setError("Лимит попыток на этот вопрос исчерпан на сегодня. Попробуй завтра.");
+          setError("Слишком много неверных попыток. Обратись к администратору.");
         } else {
-          setError(
-            `Неверно. Осталось попыток на сегодня: ${data.remainingAttempts}`
-          );
+          setError(`Неверно. Осталось попыток: ${data.remainingAttempts}`);
           setShaking(true);
           setTimeout(() => setShaking(false), 400);
         }
@@ -136,7 +132,6 @@ export default function RegisterPage() {
     setRegistering(true);
 
     const supabase = createClient();
-
     const { error } = await supabase.auth.signUp({
       email,
       password,
@@ -153,19 +148,12 @@ export default function RegisterPage() {
     }
   }
 
-  const progress =
-    questions.length > 0
-      ? Math.round((currentStep / questions.length) * 100)
-      : 0;
-
   return (
     <main className="relative min-h-screen flex flex-col items-center justify-center bg-obsidian overflow-hidden px-6">
       <div className="absolute inset-0 pointer-events-none">
         <div
-          className="absolute top-0 right-0 h-96 w-96 opacity-[0.04]"
-          style={{
-            background: "radial-gradient(circle, #c9a84c, transparent)",
-          }}
+          className="absolute top-0 right-0 w-96 h-96 opacity-[0.04]"
+          style={{ background: "radial-gradient(circle, #c9a84c, transparent)" }}
         />
       </div>
 
@@ -173,11 +161,11 @@ export default function RegisterPage() {
         <div className="mb-10 flex flex-col items-center">
           <button
             onClick={() => router.push("/")}
-            className="self-start mb-8 flex items-center gap-2 font-mono text-xs uppercase tracking-widest text-ghost transition-colors hover:text-ivory"
+            className="self-start text-ghost text-xs tracking-widest uppercase hover:text-ivory transition-colors mb-8 flex items-center gap-2 font-mono"
           >
-            <span>←</span> Назад
+            ← Назад
           </button>
-          <p className="mb-3 font-mono text-xs uppercase tracking-[0.3em] text-ghost">
+          <p className="font-mono text-xs text-ghost tracking-[0.3em] uppercase mb-3">
             Вступление в клуб
           </p>
           <div className="divider-gold w-24" />
@@ -185,32 +173,23 @@ export default function RegisterPage() {
 
         {stage === "loading" && (
           <div className="text-center">
-            <p className="animate-pulse font-mono text-xs tracking-widest text-ghost">
+            <p className="font-mono text-xs text-ghost tracking-widest animate-pulse">
               Загрузка...
             </p>
           </div>
         )}
 
-        {stage === "quiz" && questions.length > 0 && (
+        {stage === "quiz" && question && (
           <div className="animate-slide-up">
-            <div className="mb-8">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="font-mono text-xs tracking-widest text-ghost">
-                  ВОПРОС {currentStep + 1} / {questions.length}
-                </span>
-                <span className="font-mono text-xs text-gold">{progress}%</span>
-              </div>
-              <div className="h-px w-full bg-ash">
-                <div
-                  className="h-px bg-gold transition-all duration-500"
-                  style={{ width: `${progress}%` }}
-                />
-              </div>
+            <div className="mb-3">
+              <p className="font-mono text-xs text-ghost tracking-widest uppercase">
+                Испытание
+              </p>
             </div>
 
-            <div className="mb-8 border border-ash bg-glass p-6">
-              <h2 className="font-heading text-2xl font-light leading-relaxed text-ivory">
-                {questions[currentStep].question_text}
+            <div className="mb-8 p-6 border border-ash bg-glass">
+              <h2 className="font-heading text-2xl font-light text-ivory leading-relaxed">
+                {question.question_text}
               </h2>
             </div>
 
@@ -223,30 +202,30 @@ export default function RegisterPage() {
                   onChange={(e) => setAnswer(e.target.value)}
                   disabled={blocked}
                   placeholder="Введите ответ..."
-                  className={`w-full bg-charcoal px-4 py-4 font-body text-sm text-ivory outline-none transition-colors ${
+                  className={`w-full bg-charcoal text-ivory font-body text-sm px-4 py-4 outline-none transition-colors ${
                     error
                       ? "border border-crimson"
                       : "border border-ash focus:border-gold-dark"
-                  } ${blocked ? "cursor-not-allowed opacity-50" : ""}`}
+                  } ${blocked ? "opacity-50 cursor-not-allowed" : ""}`}
                 />
               </div>
 
-              <p className="font-mono text-xs tracking-wide text-ghost">
-                Осталось попыток на сегодня: {remainingAttempts}
-              </p>
-
               {error && (
-                <p className="font-mono text-xs tracking-wide text-crimson">
+                <p className="font-mono text-xs text-crimson tracking-wide">
                   {error}
                 </p>
               )}
 
+              <p className="font-mono text-xs text-ghost tracking-wide">
+                Осталось попыток: {remainingAttempts}
+              </p>
+
               <button
                 type="submit"
                 disabled={checking || blocked || !answer.trim()}
-                className="w-full border border-gold-dark py-4 font-body text-sm uppercase tracking-[0.15em] text-gold transition-all duration-300 hover:bg-gold hover:text-obsidian disabled:cursor-not-allowed disabled:opacity-30"
+                className="w-full py-4 border border-gold-dark text-gold font-body text-sm tracking-[0.15em] uppercase hover:bg-gold hover:text-obsidian transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed"
               >
-                {checking ? "Проверка..." : "Далее →"}
+                {checking ? "Проверка..." : "Подтвердить →"}
               </button>
             </form>
           </div>
@@ -255,7 +234,7 @@ export default function RegisterPage() {
         {stage === "register" && (
           <div className="animate-slide-up">
             <div className="mb-8 text-center">
-              <p className="mb-2 font-mono text-xs uppercase tracking-[0.2em] text-gold">
+              <p className="font-mono text-xs text-gold tracking-[0.2em] uppercase mb-2">
                 Испытание пройдено
               </p>
               <h2 className="font-heading text-3xl font-light text-ivory">
@@ -265,7 +244,7 @@ export default function RegisterPage() {
 
             <form onSubmit={handleRegister} className="flex flex-col gap-4">
               <div className="flex flex-col gap-1">
-                <label className="font-mono text-xs uppercase tracking-widest text-ghost">
+                <label className="font-mono text-xs text-ghost tracking-widest uppercase">
                   Email
                 </label>
                 <input
@@ -274,12 +253,12 @@ export default function RegisterPage() {
                   onChange={(e) => setEmail(e.target.value)}
                   required
                   autoComplete="email"
-                  className="bg-charcoal border border-ash px-4 py-3 font-body text-sm text-ivory outline-none transition-colors focus:border-gold-dark"
+                  className="bg-charcoal border border-ash text-ivory font-body text-sm px-4 py-3 outline-none focus:border-gold-dark transition-colors"
                 />
               </div>
 
               <div className="flex flex-col gap-1">
-                <label className="font-mono text-xs uppercase tracking-widest text-ghost">
+                <label className="font-mono text-xs text-ghost tracking-widest uppercase">
                   Пароль
                 </label>
                 <input
@@ -289,12 +268,12 @@ export default function RegisterPage() {
                   required
                   minLength={8}
                   autoComplete="new-password"
-                  className="bg-charcoal border border-ash px-4 py-3 font-body text-sm text-ivory outline-none transition-colors focus:border-gold-dark"
+                  className="bg-charcoal border border-ash text-ivory font-body text-sm px-4 py-3 outline-none focus:border-gold-dark transition-colors"
                 />
               </div>
 
               <div className="flex flex-col gap-1">
-                <label className="font-mono text-xs uppercase tracking-widest text-ghost">
+                <label className="font-mono text-xs text-ghost tracking-widest uppercase">
                   Пароль ещё раз
                 </label>
                 <input
@@ -303,12 +282,12 @@ export default function RegisterPage() {
                   onChange={(e) => setPassword2(e.target.value)}
                   required
                   autoComplete="new-password"
-                  className="bg-charcoal border border-ash px-4 py-3 font-body text-sm text-ivory outline-none transition-colors focus:border-gold-dark"
+                  className="bg-charcoal border border-ash text-ivory font-body text-sm px-4 py-3 outline-none focus:border-gold-dark transition-colors"
                 />
               </div>
 
               {regError && (
-                <p className="font-mono text-xs tracking-wide text-crimson">
+                <p className="font-mono text-xs text-crimson tracking-wide">
                   {regError}
                 </p>
               )}
@@ -316,7 +295,7 @@ export default function RegisterPage() {
               <button
                 type="submit"
                 disabled={registering}
-                className="mt-2 w-full bg-gold py-4 font-body text-sm uppercase tracking-[0.15em] text-obsidian transition-all duration-300 hover:bg-gold-light disabled:opacity-50"
+                className="w-full py-4 bg-gold text-obsidian font-body text-sm tracking-[0.15em] uppercase hover:bg-gold-light transition-all duration-300 disabled:opacity-50 mt-2"
               >
                 {registering ? "Создание аккаунта..." : "Зарегистрироваться"}
               </button>
@@ -327,7 +306,7 @@ export default function RegisterPage() {
         {stage === "verify" && (
           <div className="text-center animate-fade-in">
             <div
-              className="mx-auto mb-6 flex h-16 w-16 items-center justify-center rounded-full border"
+              className="w-16 h-16 rounded-full border flex items-center justify-center mx-auto mb-6"
               style={{ borderColor: "rgba(201,168,76,0.4)" }}
             >
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
@@ -340,17 +319,17 @@ export default function RegisterPage() {
                 />
               </svg>
             </div>
-            <h2 className="mb-4 font-heading text-3xl font-light text-ivory">
+            <h2 className="font-heading text-3xl font-light text-ivory mb-4">
               Проверьте почту
             </h2>
-            <p className="font-body text-sm leading-relaxed text-ghost">
+            <p className="font-body text-sm text-ghost leading-relaxed">
               Мы отправили письмо с подтверждением на{" "}
               <span className="text-gold">{email}</span>.
               <br />
               Перейдите по ссылке в письме для активации аккаунта.
             </p>
-            <div className="divider-gold mx-auto mt-8 w-24" />
-            <p className="mt-6 font-mono text-xs tracking-widest text-ash">
+            <div className="divider-gold w-24 mx-auto mt-8" />
+            <p className="font-mono text-xs text-ash mt-6 tracking-widest">
               Письмо не пришло? Проверь папку «Спам»
             </p>
           </div>
@@ -358,15 +337,4 @@ export default function RegisterPage() {
       </div>
     </main>
   );
-}
-
-function shuffleQuestions(items: Question[]) {
-  const shuffled = [...items];
-
-  for (let i = shuffled.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-  }
-
-  return shuffled;
 }
