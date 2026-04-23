@@ -1,9 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/server";
 
-const MAX_ATTEMPTS_PER_DAY = 5;
+const MAX_ATTEMPTS_PER_DAY = 3;
 
-function getClientIdentifier(request: NextRequest) {
+function normalizeAnswer(value: string) {
+  return value
+    .normalize("NFKC")
+    .replace(/\u00A0/g, " ")
+    .replace(/ё/gi, "е")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("ru-RU");
+}
+
+function getClientIdentifier(request: NextRequest, sessionKey?: string) {
+  if (typeof sessionKey === "string" && sessionKey.trim().length > 0) {
+    return `session:${sessionKey.trim()}`;
+  }
+
   const ip =
     request.ip ??
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
@@ -17,17 +31,28 @@ function getAttemptDate() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function isAttemptsTableMissing(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+
+  const maybeError = error as { code?: string; message?: string };
+  return (
+    maybeError.code === "PGRST205" &&
+    typeof maybeError.message === "string" &&
+    maybeError.message.includes("daily_question_attempts")
+  );
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { questionId, userAnswer } = body;
+    const { questionId, userAnswer, sessionKey } = body;
 
     if (!questionId || typeof userAnswer !== "string") {
       return NextResponse.json({ error: "Неверный запрос" }, { status: 400 });
     }
 
-    const supabase = createAdminClient();
-    const identifier = getClientIdentifier(request);
+    const supabase = await createAdminClient();
+    const identifier = getClientIdentifier(request, sessionKey);
     const attemptDate = getAttemptDate();
 
     const { data: existingAttempt, error: attemptReadError } = await supabase
@@ -38,16 +63,19 @@ export async function POST(request: NextRequest) {
       .eq("attempt_date", attemptDate)
       .maybeSingle();
 
-    if (attemptReadError) {
+    const attemptsTrackingAvailable = !isAttemptsTableMissing(attemptReadError);
+
+    if (attemptReadError && attemptsTrackingAvailable) {
       return NextResponse.json(
         { error: "Не удалось проверить лимит попыток" },
         { status: 500 }
       );
     }
 
-    const attemptsUsed = existingAttempt?.attempts_count ?? 0;
+    const attemptsUsed =
+      attemptsTrackingAvailable ? existingAttempt?.attempts_count ?? 0 : 0;
 
-    if (attemptsUsed >= MAX_ATTEMPTS_PER_DAY) {
+    if (attemptsTrackingAvailable && attemptsUsed >= MAX_ATTEMPTS_PER_DAY) {
       return NextResponse.json(
         {
           correct: false,
@@ -69,34 +97,51 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Вопрос не найден" }, { status: 404 });
     }
 
-    const { error: attemptWriteError } = await supabase
-      .from("daily_question_attempts")
-      .upsert(
-        {
-          identifier,
-          question_id: questionId,
-          attempt_date: attemptDate,
-          attempts_count: attemptsUsed + 1,
-        },
-        {
-          onConflict: "identifier,question_id,attempt_date",
-        }
-      );
+    const isCorrect =
+      normalizeAnswer(data.correct_answer) === normalizeAnswer(userAnswer);
 
-    if (attemptWriteError) {
-      return NextResponse.json(
-        { error: "Не удалось сохранить попытку" },
-        { status: 500 }
-      );
+    if (isCorrect) {
+      return NextResponse.json({
+        correct: true,
+        remainingAttempts: attemptsTrackingAvailable
+          ? Math.max(0, MAX_ATTEMPTS_PER_DAY - attemptsUsed)
+          : MAX_ATTEMPTS_PER_DAY,
+      });
     }
 
-    const isCorrect =
-      data.correct_answer.toLowerCase().trim() ===
-      userAnswer.toLowerCase().trim();
+    const nextAttemptsUsed = attemptsUsed + 1;
+
+    if (attemptsTrackingAvailable) {
+      const { error: attemptWriteError } = await supabase
+        .from("daily_question_attempts")
+        .upsert(
+          {
+            identifier,
+            question_id: questionId,
+            attempt_date: attemptDate,
+            attempts_count: nextAttemptsUsed,
+          },
+          {
+            onConflict: "identifier,question_id,attempt_date",
+          }
+        );
+
+      if (attemptWriteError) {
+        return NextResponse.json(
+          { error: "Не удалось сохранить попытку" },
+          { status: 500 }
+        );
+      }
+    }
 
     return NextResponse.json({
-      correct: isCorrect,
-      remainingAttempts: Math.max(0, MAX_ATTEMPTS_PER_DAY - (attemptsUsed + 1)),
+      correct: false,
+      blocked: attemptsTrackingAvailable
+        ? nextAttemptsUsed >= MAX_ATTEMPTS_PER_DAY
+        : false,
+      remainingAttempts: attemptsTrackingAvailable
+        ? Math.max(0, MAX_ATTEMPTS_PER_DAY - nextAttemptsUsed)
+        : MAX_ATTEMPTS_PER_DAY,
     });
   } catch {
     return NextResponse.json({ error: "Внутренняя ошибка" }, { status: 500 });

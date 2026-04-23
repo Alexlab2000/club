@@ -37,7 +37,7 @@ export default function WelcomePage() {
         </p>
 
         <Link
-          href="/dashboard"
+          href="/home"
           className="w-full py-4 bg-gold text-obsidian font-body text-sm tracking-[0.15em] uppercase hover:bg-gold-light transition-all duration-300 text-center block"
         >
           Войти в кабинет →

@@ -1,39 +1,37 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-type CookieToSet = {
-  name: string;
-  value: string;
-  options?: {
-    domain?: string;
-    expires?: Date;
-    httpOnly?: boolean;
-    maxAge?: number;
-    path?: string;
-    sameSite?: "lax" | "strict" | "none";
-    secure?: boolean;
-  };
+type CookieOptions = {
+  domain?: string;
+  expires?: Date;
+  httpOnly?: boolean;
+  maxAge?: number;
+  path?: string;
+  sameSite?: "lax" | "strict" | "none";
+  secure?: boolean;
 };
 
+const PROTECTED_PREFIXES = ["/home", "/dashboard"];
+const AUTH_ONLY_PATHS = ["/", "/register"];
+
 export async function middleware(request: NextRequest) {
-  let supabaseResponse = NextResponse.next({ request });
+  let response = NextResponse.next({ request });
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        getAll() {
-          return request.cookies.getAll();
+        get(name: string) {
+          return request.cookies.get(name)?.value;
         },
-        setAll(cookiesToSet: CookieToSet[]) {
-          cookiesToSet.forEach(({ name, value }) =>
-            request.cookies.set(name, value)
-          );
-          supabaseResponse = NextResponse.next({ request });
-          cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options)
-          );
+        set(name: string, value: string, options: CookieOptions) {
+          request.cookies.set(name, value);
+          response.cookies.set(name, value, options);
+        },
+        remove(name: string, options: CookieOptions) {
+          request.cookies.set(name, "");
+          response.cookies.set(name, "", { ...options, maxAge: 0 });
         },
       },
     }
@@ -44,18 +42,19 @@ export async function middleware(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const { pathname } = request.nextUrl;
+  const isProtected = PROTECTED_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 
-  // Защищённые роуты — только для авторизованных
-  if (!user && pathname.startsWith("/dashboard")) {
+  if (!user && isProtected) {
     return NextResponse.redirect(new URL("/", request.url));
   }
 
-  // Авторизованным не нужно снова видеть логин
-  if (user && (pathname === "/" || pathname === "/register")) {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
+  const isAuthOnly = AUTH_ONLY_PATHS.includes(pathname);
+
+  if (user && isAuthOnly) {
+    return NextResponse.redirect(new URL("/home", request.url));
   }
 
-  return supabaseResponse;
+  return response;
 }
 
 export const config = {

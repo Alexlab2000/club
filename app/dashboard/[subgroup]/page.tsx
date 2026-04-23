@@ -8,7 +8,7 @@ interface PageProps {
 }
 
 export default async function SubgroupPage({ params }: PageProps) {
-  const supabase = createClient();
+  const supabase = await createClient();
 
   const { data: subgroup } = await supabase
     .from("subgroups")
@@ -26,7 +26,7 @@ export default async function SubgroupPage({ params }: PageProps) {
     <div className="animate-fade-in">
       <div className="mb-10">
         <Link
-          href="/dashboard"
+          href="/home"
           className="font-mono text-xs text-ghost tracking-widest uppercase hover:text-ivory transition-colors flex items-center gap-2 mb-8"
         >
           ← Назад

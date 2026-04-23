@@ -1,12 +1,13 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import Link from "next/link";
 
 export default async function DashboardLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const supabase = createClient();
+  const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
@@ -14,6 +15,8 @@ export default async function DashboardLayout({
   if (!user) {
     redirect("/");
   }
+
+  const userEmail = user.email ?? "";
 
   return (
     <div className="min-h-screen bg-obsidian">
@@ -43,8 +46,20 @@ export default async function DashboardLayout({
 
           <div className="flex items-center gap-6">
             <span className="font-mono text-xs text-ghost hidden sm:block">
-              {user.email}
+              {userEmail}
             </span>
+            <Link
+              href="/home"
+              className="font-mono text-xs text-ghost tracking-widest uppercase hover:text-ivory transition-colors"
+            >
+              Главная
+            </Link>
+            <Link
+              href="/dashboard/account"
+              className="font-mono text-xs text-ghost tracking-widest uppercase hover:text-ivory transition-colors"
+            >
+              Кабинет
+            </Link>
             <LogoutButton />
           </div>
         </div>

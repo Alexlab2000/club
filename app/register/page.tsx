@@ -1,3 +1,22 @@
+/**
+ * ФАЙЛ: app/register/page.tsx
+ * НАЗНАЧЕНИЕ: Страница регистрации — квиз + создание аккаунта
+ *
+ * ЭТАПЫ (stage):
+ *   loading  → загружаем вопрос из базы
+ *   quiz     → пользователь отвечает на вопрос-пароль
+ *   register → форма создания email + password
+ *   verify   → "проверьте почту" после signUp
+ *
+ * ИСПРАВЛЕНИЕ:
+ * sessionKey теперь хранится в sessionStorage браузера.
+ * Раньше он генерировался заново при каждом рендере компонента,
+ * из-за чего перезагрузка страницы сбрасывала счётчик попыток —
+ * пользователь мог обходить лимит простым F5.
+ *
+ * sessionStorage живёт пока открыта вкладка браузера.
+ * Закрыл вкладку — sessionKey удаляется — справедливо.
+ */
 "use client";
 
 export const dynamic = "force-dynamic";
@@ -6,51 +25,95 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
+// ── Типы ─────────────────────────────────────────────────────
 interface Question {
   id: string;
   question_text: string;
   order_priority: number;
 }
 
+// Stage — возможные состояния страницы регистрации
 type Stage = "loading" | "quiz" | "register" | "verify";
 
+// ── Ключ для sessionStorage ───────────────────────────────────
+// Константа вынесена чтобы не опечататься при использовании в двух местах
+const SESSION_STORAGE_KEY = "club_reg_session_key";
+
+/**
+ * Возвращает sessionKey — уникальный идентификатор этой попытки регистрации.
+ * Если уже создан (хранится в sessionStorage) — возвращает существующий.
+ * Если нет — генерирует новый и сохраняет.
+ *
+ * Вызывается только в браузере (typeof window !== "undefined"),
+ * потому что sessionStorage недоступен на сервере.
+ */
+function getOrCreateSessionKey(): string {
+  try {
+    const existing = sessionStorage.getItem(SESSION_STORAGE_KEY);
+    if (existing) return existing;
+
+    // crypto.randomUUID() — надёжный генератор уникальных ID
+    const newKey = crypto.randomUUID();
+    sessionStorage.setItem(SESSION_STORAGE_KEY, newKey);
+    return newKey;
+  } catch {
+    // Если sessionStorage недоступен (редкий случай) — возвращаем случайный ID
+    return Math.random().toString(36).slice(2);
+  }
+}
+
+// ── Главный компонент ─────────────────────────────────────────
 export default function RegisterPage() {
+  // ── Состояния квиза ─────────────────────────────────────
   const [stage, setStage] = useState<Stage>("loading");
   const [question, setQuestion] = useState<Question | null>(null);
   const [answer, setAnswer] = useState("");
   const [error, setError] = useState("");
   const [blocked, setBlocked] = useState(false);
   const [remainingAttempts, setRemainingAttempts] = useState(3);
-  const [shaking, setShaking] = useState(false);
+  const [shaking, setShaking] = useState(false); // анимация тряски при неверном ответе
   const [checking, setChecking] = useState(false);
 
+  // ── Состояния формы регистрации ──────────────────────────
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [password2, setPassword2] = useState("");
   const [regError, setRegError] = useState("");
   const [registering, setRegistering] = useState(false);
 
+  // ── Рефы ─────────────────────────────────────────────────
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
 
-  const sessionKey = useRef(
-    typeof crypto !== "undefined"
-      ? crypto.randomUUID()
-      : Math.random().toString(36)
-  );
+  /**
+   * sessionKey — уникальный ключ этой сессии регистрации.
+   * Хранится в sessionStorage, не сбрасывается при перезагрузке страницы.
+   * Используется сервером для отслеживания попыток ответа.
+   *
+   * useRef хранит значение между рендерами без вызова перерисовки.
+   * Инициализируем lazy (через функцию) — выполняется один раз.
+   */
+  const sessionKey = useRef<string>("");
 
+  // Инициализируем sessionKey при монтировании компонента в браузере
+  useEffect(() => {
+    sessionKey.current = getOrCreateSessionKey();
+  }, []);
+
+  // ── Загрузка вопроса из базы ─────────────────────────────
   useEffect(() => {
     async function loadQuestion() {
       const supabase = createClient();
-      const { data, error } = await supabase
+      const { data, error: fetchError } = await supabase
         .from("registration_questions")
         .select("id, question_text, order_priority");
 
-      if (error || !data || data.length === 0) {
+      if (fetchError || !data || data.length === 0) {
         setError("Не удалось загрузить вопросы. Попробуй позже.");
         return;
       }
 
+      // Выбираем случайный вопрос из списка
       const randomIndex = Math.floor(Math.random() * data.length);
       setQuestion(data[randomIndex]);
       setStage("quiz");
@@ -59,12 +122,18 @@ export default function RegisterPage() {
     loadQuestion();
   }, []);
 
+  // ── Фокус на поле ввода когда появляется квиз ───────────
   useEffect(() => {
     if (stage === "quiz" && inputRef.current) {
       inputRef.current.focus();
     }
   }, [stage]);
 
+  // ── Проверка ответа ──────────────────────────────────────
+  /**
+   * Отправляет ответ на сервер (POST /api/check-answer).
+   * Сервер сравнивает с правильным ответом и считает попытки.
+   */
   async function handleCheckAnswer(e: React.FormEvent) {
     e.preventDefault();
     if (!answer.trim() || checking || blocked || !question) return;
@@ -79,31 +148,36 @@ export default function RegisterPage() {
         body: JSON.stringify({
           questionId: question.id,
           userAnswer: answer.trim(),
-          sessionKey: sessionKey.current,
+          sessionKey: sessionKey.current, // теперь стабильный между перезагрузками
         }),
       });
 
       const data = await res.json();
 
+      // Лимит попыток исчерпан
       if (res.status === 429 || data.blocked) {
         setBlocked(true);
-        setError("Слишком много неверных попыток. Попробуй позже.");
+        setError("Слишком много неверных попыток. Попробуй завтра.");
         setChecking(false);
         return;
       }
 
       if (data.correct) {
+        // Верный ответ — переходим к регистрации
         setAnswer("");
         setError("");
         setRemainingAttempts(3);
         setStage("register");
       } else {
+        // Неверный ответ
         setRemainingAttempts(data.remainingAttempts ?? 0);
+
         if (data.remainingAttempts === 0) {
           setBlocked(true);
-          setError("Слишком много неверных попыток. Обратись к администратору.");
+          setError("Лимит попыток исчерпан. Обратись к администратору.");
         } else {
           setError(`Неверно. Осталось попыток: ${data.remainingAttempts}`);
+          // Анимация тряски поля ввода
           setShaking(true);
           setTimeout(() => setShaking(false), 400);
         }
@@ -115,10 +189,17 @@ export default function RegisterPage() {
     setChecking(false);
   }
 
+  // ── Регистрация аккаунта ─────────────────────────────────
+  /**
+   * Создаёт аккаунт через Supabase Auth.
+   * После регистрации Supabase отправляет письмо с ссылкой подтверждения.
+   * Ссылка ведёт на /auth/callback?next=/home → пользователь попадает на /home.
+   */
   async function handleRegister(e: React.FormEvent) {
     e.preventDefault();
     setRegError("");
 
+    // Валидация на клиенте (дополнительная проверка перед запросом)
     if (password !== password2) {
       setRegError("Пароли не совпадают");
       return;
@@ -132,22 +213,31 @@ export default function RegisterPage() {
     setRegistering(true);
 
     const supabase = createClient();
-    const { error } = await supabase.auth.signUp({
+    const { error: signUpError } = await supabase.auth.signUp({
       email,
       password,
       options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback?next=/welcome`,
+        // Куда вернётся пользователь после клика в письме.
+        // /auth/callback обработает code и перенаправит на /home.
+        emailRedirectTo: `${window.location.origin}/auth/callback?next=/home`,
       },
     });
 
-    if (error) {
-      setRegError(error.message);
+    if (signUpError) {
+      setRegError(signUpError.message);
       setRegistering(false);
     } else {
+      // Успех — удаляем sessionKey (он больше не нужен)
+      try {
+        sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      } catch {
+        // sessionStorage недоступен — не критично
+      }
       setStage("verify");
     }
   }
 
+  // ── Рендер ───────────────────────────────────────────────
   return (
     <main className="relative min-h-screen flex flex-col items-center justify-center bg-obsidian overflow-hidden px-6">
       <div className="absolute inset-0 pointer-events-none">
@@ -171,6 +261,7 @@ export default function RegisterPage() {
           <div className="divider-gold w-24" />
         </div>
 
+        {/* ── Экран загрузки ─────────────────────────── */}
         {stage === "loading" && (
           <div className="text-center">
             <p className="font-mono text-xs text-ghost tracking-widest animate-pulse">
@@ -179,6 +270,7 @@ export default function RegisterPage() {
           </div>
         )}
 
+        {/* ── Квиз: вопрос-пароль ────────────────────── */}
         {stage === "quiz" && question && (
           <div className="animate-slide-up">
             <div className="mb-3">
@@ -231,6 +323,7 @@ export default function RegisterPage() {
           </div>
         )}
 
+        {/* ── Форма регистрации ───────────────────────── */}
         {stage === "register" && (
           <div className="animate-slide-up">
             <div className="mb-8 text-center">
@@ -303,6 +396,7 @@ export default function RegisterPage() {
           </div>
         )}
 
+        {/* ── Экран "проверьте почту" ─────────────────── */}
         {stage === "verify" && (
           <div className="text-center animate-fade-in">
             <div
